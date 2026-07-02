@@ -1,6 +1,7 @@
 # Dataset PIE (non committare mai i dati)
 data/PIE/
 data/JAAD/
+data/poses/
 *.mp4
 *.avi
 *.mov
