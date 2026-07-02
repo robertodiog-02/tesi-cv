@@ -1,0 +1,27 @@
+experiment:
+  name: baseline_gru_yes_speed_no_delta
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 16
+
+model:
+  name: BaselineGRU
+  hidden_dim: 64
+  num_layers: 1
+  dropout: 0.5
+  use_bbox_delta: false    # se true aggiunge i delta bbox (+4 dim)
+  use_ego_speed: true    # se true aggiunge l'ego-speed (+1 dim)
+
+training:
+  epochs: 100
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  patience: 15
+  scheduler: cosine
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs

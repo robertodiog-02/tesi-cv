@@ -1,0 +1,56 @@
+# =============================================================
+# PedGT — replica del paper (Riaz et al., IEEE IV 2025) su PIE
+# =============================================================
+# Iperparametri dal paper:
+#   obs_len = 26 frame (~1s), sliding window overlap 1 frame (step=25 -> overlap≈0.96)
+#   GCN 5->64 (x3), Transformer 2 layer x 4 head, d_model=128, dropout 0.7
+#   Adam, lr 1e-4 (PIE), weight_decay 5e-5, 30 epoche, batch 64
+#   Normalizzazione: reference-point (best su PIE, Tab. II)
+
+experiment:
+  name: pedgt_pie_hip_reference_seq_overlapdiverso_dropout_encoder_noclip_speed
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 26
+  overlap: 0.96              # TRAIN: sliding window quasi-totale (step=1, augmentation)
+  overlap_eval: 0.6          # VAL/TEST: usato solo se anchor_eval=false
+  anchor_eval: true          # VAL/TEST: finestre ancorate agli stessi end-point TTE del benchmark
+  endpoint_step: 6           # step assoluto tra end-point (come benchmark obs_len=16/overlap=0.6)
+  pose_dir: data/poses       # cartella con pie_hrnet_poses_setXX.pkl (set01..06)
+  pose_norm: hip_reference_seq   # opzioni: reference_point (A, default, centro=bbox, scala=spalle) |
+                             #          hip_reference (C, centro=bacino CHip, scala=torso, piu' stabile) |
+                             #          reference_point_seq (B, rif. primo frame) |
+                             #          hip_reference_seq (D, centro=bbox 1° frame, scala=altezza bbox) |
+                             #          reference_point_perframe (rotta, solo ablation) |
+                             #          minmax (best su JAAD) | none
+
+model:
+  name: PedGT
+  in_channels: 5             # (x, y, conf, cx, cy)
+  d_model: 128
+  gcn_hidden: 64
+  spatial_out: 64
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 256
+  dropout: 0.7
+  encoder_dropout: 0.1
+  causal: false              # true = maschera causale nell'encoder (deviazione dal paper, bidirezionale)
+  use_ego_speed: true       # true = inietta ego-speed come embedding temporale additivo (deviazione dal paper)
+
+training:
+  epochs: 30
+  batch_size: 64
+  lr: 1.0e-4                 # PIE (paper); per JAAD usare 5e-4
+  weight_decay: 5.0e-5
+  patience: 15
+  grad_clip: 5.0             # max-norm per il gradient clipping (loggato a ogni epoca)
+  scheduler: cosine          # 'cosine' | 'plateau' (ReduceLROnPlateau su val_f1)
+  plateau_factor: 0.5        # solo se scheduler=plateau: fattore di riduzione lr
+  plateau_patience: 5        # solo se scheduler=plateau: epoche di pazienza
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs
