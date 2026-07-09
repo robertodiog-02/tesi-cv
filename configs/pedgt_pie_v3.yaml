@@ -8,7 +8,7 @@
 #   Normalizzazione: reference-point (best su PIE, Tab. II)
 
 experiment:
-  name: pedgt_pie_layerDense_beforeGCN_clip3.5_onlykinematics
+  name: pedgt_pie_layerDense_beforeGCN_clip3.5_kinematics_pose
   seed: 42
 
 data:
@@ -52,7 +52,7 @@ streams:
 
   # --- Ramo POSE: GCN a 19 giunti (come il paper) ---
   pose:
-    enabled: false              # true = usa lo scheletro nella GCN
+    enabled: true              # true = usa lo scheletro nella GCN
     use_center_channels: true  # true  -> input GCN [T,19,5] = (x,y,conf,cx,cy)
                                # false -> input GCN [T,19,3] = (x,y,conf); toglie
                                #          le 2 coordinate di traiettoria (center)
@@ -71,18 +71,18 @@ streams:
     bbox_format: xyxy          # 'xyxy'  -> (x1,y1,x2,y2)  (come le annotazioni)
                                # 'cxcywh'-> (cx,cy,w,h)
                                # In entrambi i casi: 4 feature bbox + 1 ego = 5 input
-    # hidden: 128              # (opz.) dim nascosta dell'MLP del ramo
+    hidden: 128              # (opz.) dim nascosta dell'MLP del ramo
     # dropout: 0.1             # (opz.) dropout dell'MLP del ramo
 
   # --- Ramo CROP: feature visuale ConvNeXt (768-dim, precomputata) ---
   crop:
     enabled: false             # true = aggiunge il ramo visuale del crop pedone
     in_dim: 768                # dimensione del vettore ConvNeXt (ultimo layer)
-    # hidden: 128
+    hidden: 128
     # dropout: 0.1
 
   # --- FUSIONE degli stream attivi ---
-  fusion: late_fusion        # 'concat_tokens'   -> somma token per-frame + 1 transformer
+  fusion: cross_attention        # 'concat_tokens'   -> somma token per-frame + 1 transformer
                                #                      (= PedGT originale con la sola pose)
                                # 'cross_attention'  -> il 1° stream attivo (pose) fa da query,
                                #                      gli altri da key/value (cross-attn per-frame)

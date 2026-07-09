@@ -138,8 +138,6 @@ def _build_streams_cfg(cfg: Dict) -> Dict:
         "pose": {
             "enabled": pose_s.get("enabled", True),
             "use_center_channels": pose_s.get("use_center_channels", True),
-            "input_proj": pose_s.get("input_proj", None),
-            "input_proj_dropout": pose_s.get("input_proj_dropout", 0.0),
         },
         "kinematics": {
             "enabled": kin_s.get("enabled", False),
@@ -182,6 +180,85 @@ def compute_metrics(labels: np.ndarray, preds: np.ndarray,
 
 # ─── Train / Eval di una epoca ────────────────────────────────────────────────
 
+def _param_branch_layer(name: str):
+    """
+    Mappa il nome di un parametro a (ramo, layer) per il logging della
+    norma dei gradienti layer-per-layer dentro ogni ramo.
+
+    Esempi di nome -> (ramo, layer):
+      encoders.pose.spatial.gcn1.lin.weight   -> ("pose", "gcn1")
+      encoders.pose.spatial.input_proj.0.weight-> ("pose", "input_proj")
+      encoders.pose.spatial.proj.weight        -> ("pose", "proj")
+      encoders.kinematics.net.0.weight         -> ("kinematics", "net0")
+      encoders.crop.net.3.weight               -> ("crop", "net3")
+      temporal.transformer.layers.0....        -> ("temporal", "L0")
+      temporals.pose.transformer.layers.1...   -> ("temporal_pose", "L1")
+      classifier.weight                        -> ("head", "classifier")
+      stream_emb / pos_embedding               -> ("other", ...)
+    """
+    parts = name.split(".")
+    # rami-encoder: encoders.<branch>.<...>
+    if parts[0] == "encoders" and len(parts) >= 2:
+        branch = parts[1]                       # pose | kinematics | crop
+        # trova un pezzo identificativo del layer
+        if "gcn1" in name: layer = "gcn1"
+        elif "gcn2" in name: layer = "gcn2"
+        elif "gcn3" in name: layer = "gcn3"
+        elif "input_proj" in name: layer = "input_proj"
+        elif "spatial.proj" in name or name.endswith("proj.weight") or name.endswith("proj.bias"):
+            layer = "proj"
+        elif "bn1" in name: layer = "bn1"
+        elif "bn2" in name: layer = "bn2"
+        elif ".net." in name:
+            # MLPStream: net.0 (Linear), net.4 (Linear2), ecc.
+            idx = parts[parts.index("net") + 1] if "net" in parts else "?"
+            layer = f"net{idx}"
+        else:
+            layer = parts[-2] if len(parts) >= 2 else "?"
+        return branch, layer
+    # transformer temporale condiviso (concat/cross) o per-stream (late)
+    if parts[0] == "temporal":
+        branch = "temporal"
+    elif parts[0] == "temporals" and len(parts) >= 2:
+        branch = f"temporal_{parts[1]}"        # temporals.pose -> temporal_pose
+    elif parts[0] == "classifier":
+        return "head", "classifier"
+    elif parts[0] in ("cross_attn", "cross_norm"):
+        return "fusion", parts[0]
+    else:
+        return "other", parts[0]
+    # layer del transformer: ...layers.<i>...
+    if "layers" in parts:
+        li = parts[parts.index("layers") + 1]
+        layer = f"L{li}"
+    elif "pos_embedding" in name:
+        layer = "pos_emb"
+    else:
+        layer = parts[-1]
+    return branch, layer
+
+
+def _per_layer_grad_norms(model):
+    """
+    Norma L2 del gradiente di OGNI parametro, aggregata per (ramo, layer).
+    Ritorna dict: {ramo: {layer: norma_l2}}. Chiamare DOPO backward(),
+    PRIMA di optimizer.step() (o comunque prima di zero_grad()).
+    La norma per (ramo,layer) e' sqrt(sum di ||g||^2 dei tensori di quel layer).
+    """
+    acc = {}
+    for name, p in model.named_parameters():
+        if p.grad is None:
+            continue
+        branch, layer = _param_branch_layer(name)
+        acc.setdefault(branch, {}).setdefault(layer, 0.0)
+        acc[branch][layer] += float(p.grad.detach().norm()) ** 2
+    # radice: da somma-di-quadrati a norma
+    for b in acc:
+        for l in acc[b]:
+            acc[b][l] = acc[b][l] ** 0.5
+    return acc
+
+
 def run_epoch(model, loader, criterion, device, optimizer=None,
               desc="train", grad_clip=1.0) -> Tuple[Dict[str, float], Dict[str, list]]:
     """
@@ -201,6 +278,8 @@ def run_epoch(model, loader, criterion, device, optimizer=None,
     grad_norm_sum = 0.0
     grad_norm_count = 0
     grad_clipped_count = 0
+    # accumulatore norme gradiente per (ramo, layer): somma sui batch
+    per_layer_sum = {}   # {ramo: {layer: somma_norme}}
 
     pbar = tqdm(loader, desc=desc, leave=False, ncols=100)
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
@@ -231,6 +310,12 @@ def run_epoch(model, loader, criterion, device, optimizer=None,
 
             if is_train:
                 loss.backward()
+                # norme per (ramo, layer) PRIMA del clipping/step
+                pl = _per_layer_grad_norms(model)
+                for b, layers in pl.items():
+                    for l, v in layers.items():
+                        per_layer_sum.setdefault(b, {}).setdefault(l, 0.0)
+                        per_layer_sum[b][l] += v
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), max_norm=grad_clip)
                 optimizer.step()
@@ -260,6 +345,12 @@ def run_epoch(model, loader, criterion, device, optimizer=None,
     if is_train and grad_norm_count > 0:
         metrics["grad_norm_mean"] = grad_norm_sum / grad_norm_count
         metrics["grad_clip_frac"] = grad_clipped_count / grad_norm_count
+        # norme gradiente per (ramo, layer), mediate sui batch.
+        # Salvate come dict annidato: metrics["grad_per_layer"][ramo][layer].
+        gpl = {}
+        for b, layers in per_layer_sum.items():
+            gpl[b] = {l: v / grad_norm_count for l, v in layers.items()}
+        metrics["grad_per_layer"] = gpl
 
     outputs = {
         "labels": all_labels,
