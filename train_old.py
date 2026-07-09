@@ -138,8 +138,6 @@ def _build_streams_cfg(cfg: Dict) -> Dict:
         "pose": {
             "enabled": pose_s.get("enabled", True),
             "use_center_channels": pose_s.get("use_center_channels", True),
-            "input_proj": pose_s.get("input_proj", None),
-            "input_proj_dropout": pose_s.get("input_proj_dropout", 0.0),
         },
         "kinematics": {
             "enabled": kin_s.get("enabled", False),

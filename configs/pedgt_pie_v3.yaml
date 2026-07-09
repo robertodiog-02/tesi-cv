@@ -1,0 +1,104 @@
+# =============================================================
+# PedGT — replica del paper (Riaz et al., IEEE IV 2025) su PIE
+# =============================================================
+# Iperparametri dal paper:
+#   obs_len = 26 frame (~1s), sliding window overlap 1 frame (step=25 -> overlap≈0.96)
+#   GCN 5->64 (x3), Transformer 2 layer x 4 head, d_model=128, dropout 0.7
+#   Adam, lr 1e-4 (PIE), weight_decay 5e-5, 30 epoche, batch 64
+#   Normalizzazione: reference-point (best su PIE, Tab. II)
+
+experiment:
+  name: pedgt_pie_layerDense_beforeGCN_clip3.5_onlykinematics
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 16
+  overlap: 0.6              # TRAIN: sliding window quasi-totale (step=1, augmentation)
+  overlap_eval: 0.6          # VAL/TEST: usato solo se anchor_eval=false
+  anchor_eval: true          # VAL/TEST: finestre ancorate agli stessi end-point TTE del benchmark
+  endpoint_step: 6           # step assoluto tra end-point (come benchmark obs_len=16/overlap=0.6)
+  pose_dir: data/poses       # cartella con pie_hrnet_poses_setXX.pkl (set01..06)
+  crop_dir: data/crops       # cartella con pie_convnext_features_setXX.pkl (usata se streams.crop.enabled)
+  pose_norm: hip_reference_seq   # opzioni: reference_point (A, default, centro=bbox, scala=spalle) |
+                             #          hip_reference (C, centro=bacino CHip, scala=torso, piu' stabile) |
+                             #          reference_point_seq (B, rif. primo frame) |
+                             #          hip_reference_seq (D, centro=bbox 1° frame, scala=altezza bbox) |
+                             #          reference_point_perframe (rotta, solo ablation) |
+                             #          minmax (best su JAAD) | none
+
+model:
+  name: PedGT
+  in_channels: 5             # (x, y, conf, cx, cy)
+  d_model: 128
+  gcn_hidden: 64
+  spatial_out: 64
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 256
+  dropout: 0.7
+  encoder_dropout: 0.1
+  causal: false              # true = maschera causale nell'encoder (deviazione dal paper, bidirezionale)
+  # NB: use_ego_speed (iniezione additiva ego nel transformer) e' stato RIMOSSO.
+  #     L'ego-speed ora vive SOLO nel ramo kinematics (streams.kinematics). Vedi sotto.
+
+# =============================================================
+# STREAMS — input multi-ramo configurabile
+# =============================================================
+# Ogni ramo si attiva/disattiva con `enabled`. Il default qui sotto
+# (solo pose, center channels ON, fusion=concat_tokens) riproduce
+# ESATTAMENTE il comportamento del PedGT originale a stream singolo.
+streams:
+
+  # --- Ramo POSE: GCN a 19 giunti (come il paper) ---
+  pose:
+    enabled: false              # true = usa lo scheletro nella GCN
+    use_center_channels: true  # true  -> input GCN [T,19,5] = (x,y,conf,cx,cy)
+                               # false -> input GCN [T,19,3] = (x,y,conf); toglie
+                               #          le 2 coordinate di traiettoria (center)
+    input_proj: [16]           # null = input diretto a gcn1 (BASELINE, come il paper).
+                               # lista di dim per un MLP per-nodo PRIMA della GCN:
+                               #   [32]    -> un dense in_ch->32 poi gcn1
+                               #   [32,64] -> due dense in_ch->32->64 poi gcn1
+                               # Alleggerisce gcn1 (Jacobiano piu' grande) ma
+                               # aggiunge parametri: tienilo stretto ([16]/[32])
+                               # su dataset piccoli per non accentuare overfitting.
+    input_proj_dropout: 0.0    # dropout tra i dense della input_proj (se attiva)
+
+  # --- Ramo KINEMATICS: cinematica pura bbox + ego ---
+  kinematics:
+    enabled: true             # true = aggiunge il ramo cinematico
+    bbox_format: xyxy          # 'xyxy'  -> (x1,y1,x2,y2)  (come le annotazioni)
+                               # 'cxcywh'-> (cx,cy,w,h)
+                               # In entrambi i casi: 4 feature bbox + 1 ego = 5 input
+    # hidden: 128              # (opz.) dim nascosta dell'MLP del ramo
+    # dropout: 0.1             # (opz.) dropout dell'MLP del ramo
+
+  # --- Ramo CROP: feature visuale ConvNeXt (768-dim, precomputata) ---
+  crop:
+    enabled: false             # true = aggiunge il ramo visuale del crop pedone
+    in_dim: 768                # dimensione del vettore ConvNeXt (ultimo layer)
+    # hidden: 128
+    # dropout: 0.1
+
+  # --- FUSIONE degli stream attivi ---
+  fusion: late_fusion        # 'concat_tokens'   -> somma token per-frame + 1 transformer
+                               #                      (= PedGT originale con la sola pose)
+                               # 'cross_attention'  -> il 1° stream attivo (pose) fa da query,
+                               #                      gli altri da key/value (cross-attn per-frame)
+                               # 'late_fusion'      -> 1 transformer per stream, concat finale
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-5                 # PIE (paper); per JAAD usare 5e-4
+  weight_decay: 5.0e-5
+  patience: 20
+  grad_clip: 3.5             # max-norm per il gradient clipping (loggato a ogni epoca)
+  scheduler: cosine          # 'cosine' | 'plateau' (ReduceLROnPlateau su val_f1)
+  plateau_factor: 0.5        # solo se scheduler=plateau: fattore di riduzione lr
+  plateau_patience: 5        # solo se scheduler=plateau: epoche di pazienza
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs

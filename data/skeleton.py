@@ -83,10 +83,22 @@ def build_adjacency(num_joints: int = NUM_JOINTS,
         A += np.eye(num_joints, dtype=np.float32)
     if normalize:
         deg = A.sum(axis=1)
+        # Protezione contro nodi isolati (grado 0 -> 1/sqrt(0) = inf).
+        if (deg <= 0).any():
+            isolated = np.where(deg <= 0)[0].tolist()
+            raise ValueError(
+                f"Nodi isolati (grado 0) in build_adjacency: {isolated}. "
+                f"Controlla JOINT_EDGES o abilita self_loops=True.")
         d_inv_sqrt = np.zeros_like(deg)
         nz = deg > 0
         d_inv_sqrt[nz] = 1.0 / np.sqrt(deg[nz])
-        A = np.diag(d_inv_sqrt) @ A @ np.diag(d_inv_sqrt)
+        # D^{-1/2} A D^{-1/2} con D diagonale == A * outer(d_inv_sqrt, d_inv_sqrt).
+        # Usiamo il prodotto esterno (broadcasting) invece di due np.diag(...) @ A:
+        # e' matematicamente identico ma NON attraversa il percorso 'matmul' di
+        # numpy, che in versioni recenti (>=2.2) emette RuntimeWarning spuri
+        # 'divide by zero / overflow in matmul' su matrici diagonali, anche
+        # quando il risultato e' corretto. Cosi' l'output resta pulito.
+        A = A * np.outer(d_inv_sqrt, d_inv_sqrt)
     return A.astype(np.float32)
 
 

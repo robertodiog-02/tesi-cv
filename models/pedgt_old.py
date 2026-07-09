@@ -42,38 +42,12 @@ from data.skeleton import build_edge_index, NUM_JOINTS
 
 # ============================================================ STREAM ENCODERS
 class PedGTSpatial(nn.Module):
-    """Triplet di GCN -> maxpool sui nodi -> FC verso d_model (pose stream).
-
-    input_proj (opzionale): lista di dimensioni per un MLP per-nodo applicato
-    PRIMA di gcn1. Es. [32] -> un dense 5->32; [32,64] -> due dense 5->32->64.
-    Ogni giunto e' proiettato indipendentemente (stesso peso per tutti i nodi,
-    come un embedding per-nodo). Se None, l'input va diretto a gcn1 (baseline).
-
-    Razionale: alleggerisce gcn1 dal salto in_channels->gcn_hidden (che nel
-    baseline ha il Jacobiano piu' grande) proiettando l'input in uno spazio
-    piu' ricco a monte. ATTENZIONE: aggiunge parametri -> puo' accentuare
-    l'overfitting su dataset piccoli. Tenerlo stretto (es. [16] o [32]).
-    """
+    """Triplet di GCN -> maxpool sui nodi -> FC verso d_model (pose stream)."""
 
     def __init__(self, in_channels: int = 5, gcn_hidden: int = 64,
-                 spatial_out: int = 64, d_model: int = 128,
-                 input_proj=None, input_proj_dropout: float = 0.0):
+                 spatial_out: int = 64, d_model: int = 128):
         super().__init__()
-        # -- input projection per-nodo (opzionale) --------------------------
-        gcn_in = in_channels
-        self.input_proj = None
-        if input_proj:
-            layers = []
-            prev = in_channels
-            for dim in input_proj:
-                layers += [nn.Linear(prev, dim), nn.ReLU()]
-                if input_proj_dropout > 0:
-                    layers.append(nn.Dropout(input_proj_dropout))
-                prev = dim
-            self.input_proj = nn.Sequential(*layers)
-            gcn_in = prev                       # gcn1 riceve l'ultima dim proiettata
-
-        self.gcn1 = GCNConv(gcn_in, gcn_hidden)
+        self.gcn1 = GCNConv(in_channels, gcn_hidden)
         self.gcn2 = GCNConv(gcn_hidden, gcn_hidden)
         self.gcn3 = GCNConv(gcn_hidden, spatial_out)
         self.bn1 = nn.BatchNorm1d(gcn_hidden)
@@ -87,9 +61,6 @@ class PedGTSpatial(nn.Module):
         """x_nodes : [M, 19, in_channels]  (M = B*T). return [M, d_model]."""
         M, N, C = x_nodes.shape
         x = x_nodes.reshape(M * N, C)
-        # proiezione per-nodo prima della GCN (se attiva)
-        if self.input_proj is not None:
-            x = self.input_proj(x)
         ei = self._batched_edge_index(M, N, x.device)
 
         h = F.relu(self.bn1(self.gcn1(x, ei)))
@@ -111,12 +82,9 @@ class PedGTSpatial(nn.Module):
 class PoseStream(nn.Module):
     """Wrapper: [B,T,19,C] -> [B,T,d_model]."""
 
-    def __init__(self, in_channels, gcn_hidden, spatial_out, d_model,
-                 input_proj=None, input_proj_dropout: float = 0.0):
+    def __init__(self, in_channels, gcn_hidden, spatial_out, d_model):
         super().__init__()
-        self.spatial = PedGTSpatial(in_channels, gcn_hidden, spatial_out,
-                                    d_model, input_proj=input_proj,
-                                    input_proj_dropout=input_proj_dropout)
+        self.spatial = PedGTSpatial(in_channels, gcn_hidden, spatial_out, d_model)
 
     def forward(self, keypoints: torch.Tensor) -> torch.Tensor:
         B, T, N, C = keypoints.shape
@@ -127,17 +95,12 @@ class PoseStream(nn.Module):
 
 class MLPStream(nn.Module):
     """Encoder per-frame per feature vettoriali (kinematics, crop).
-    [B,T,in_dim] -> [B,T,d_model]. MLP a 2 layer con LayerNorm+ReLU.
-
-    input_dropout: dropout applicato PRIMA della prima Linear, cioe' sulle
-    feature grezze (utile per il crop 768-dim: spegne a caso una frazione
-    dei canali visivi per ridurre la memorizzazione dell'aspetto)."""
+    [B,T,in_dim] -> [B,T,d_model]. MLP a 2 layer con LayerNorm+ReLU."""
 
     def __init__(self, in_dim: int, d_model: int, hidden: Optional[int] = None,
-                 dropout: float = 0.1, input_dropout: float = 0.0):
+                 dropout: float = 0.1):
         super().__init__()
         hidden = hidden or d_model
-        self.in_drop = nn.Dropout(input_dropout) if input_dropout > 0 else nn.Identity()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.LayerNorm(hidden),
@@ -147,7 +110,7 @@ class MLPStream(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(self.in_drop(x))
+        return self.net(x)
 
 
 # ============================================================ TEMPORAL / HEAD
@@ -264,9 +227,7 @@ class PedGT(nn.Module):
                 pose_ch = 5 if cfg.get("use_center_channels", True) else 3
                 pose_ch = cfg.get("in_channels", pose_ch)
                 self.encoders["pose"] = PoseStream(
-                    pose_ch, gcn_hidden, spatial_out, d_model,
-                    input_proj=cfg.get("input_proj", None),
-                    input_proj_dropout=cfg.get("input_proj_dropout", 0.0))
+                    pose_ch, gcn_hidden, spatial_out, d_model)
             elif k == "kinematics":
                 self.encoders["kinematics"] = MLPStream(
                     cfg.get("in_dim", 5), d_model,
