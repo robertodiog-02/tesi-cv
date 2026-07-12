@@ -1,0 +1,79 @@
+# =============================================================
+# ABLATION 4 — GRAPHSAGE al posto della GCN nel ramo posa
+# =============================================================
+# Mantiene la struttura del grafo (scheletro a 19 giunti, edge del paper),
+# ma sostituisce i 3 layer GCNConv con 3 layer SAGEConv (GraphSAGE):
+# aggregazione mean dei vicini + skip del nodo stesso. Piu' espressivo
+# della GCN su grafi piccoli, spesso piu' robusto al rumore dei giunti.
+#
+# Alternative disponibili (basta cambiare 'encoder'):
+#   encoder: graphsage   -> SAGEConv   (questa prova)
+#   encoder: gat         -> GATConv    (attenzione sugli edge, 4 head)
+#   encoder: gin         -> GINConv    (MLP su somma vicini, molto espressivo)
+#   encoder: gcn         -> GCNConv    (baseline)
+#
+# Differenza vs baseline: streams.pose.encoder = graphsage
+# =============================================================
+
+experiment:
+  name: pedgt_pie_ablation4_graphsage
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 16
+  overlap: 0.6
+  overlap_eval: 0.6
+  anchor_eval: true
+  endpoint_step: 6
+  pose_dir: data/poses
+  crop_dir: data/crops
+  pose_norm: hip_reference_seq
+
+model:
+  name: PedGT
+  in_channels: 5
+  d_model: 128
+  gcn_hidden: 64
+  spatial_out: 64
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 256
+  dropout: 0.7
+  encoder_dropout: 0.1
+  causal: false
+
+streams:
+  pose:
+    enabled: true
+    use_center_channels: true
+    encoder: graphsage        # <<< PROVA 4: SAGEConv al posto di GCNConv
+    input_proj: [16]
+    input_proj_dropout: 0.0
+
+  kinematics:
+    enabled: true
+    bbox_format: xyxy
+    hidden: 128
+
+  crop:
+    enabled: false
+    in_dim: 768
+    hidden: 128
+
+  fusion: cross_attention
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-5
+  weight_decay: 5.0e-5
+  patience: 20
+  grad_clip: 3.5
+  scheduler: cosine
+  plateau_factor: 0.5
+  plateau_patience: 5
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs

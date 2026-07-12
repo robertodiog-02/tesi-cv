@@ -1,0 +1,80 @@
+# =============================================================
+# ABLATION 5 — NORMALIZZAZIONE BBOX-LOCAL FRAME-PER-FRAME (sola posa)
+# =============================================================
+# Normalizzazione "classica" da skeleton action-recognition: ogni frame e'
+# normalizzato IN MODO INDIPENDENTE rispetto alla propria bounding box.
+#     x_norm = (x - x1_bbox) / w_bbox
+#     y_norm = (y - y1_bbox) / h_bbox
+# I keypoint finiscono in [0,1] relativi al box -> posa scale-invariant E
+# position-invariant. La TRAIETTORIA ASSOLUTA e' eliminata di proposito:
+# la rete vede solo COME si muove il corpo, non DOVE va il pedone.
+#
+# Questa variante TIENE i canali center (cx,cy). Con bbox_local pero' cadono
+# a ~(0.5, 0.5) costante -> informazione quasi nulla (la rete li ignorera').
+# Per la posa pura a 3 canali usa il config _no_center.
+#
+# Differenza vs baseline: data.pose_norm = bbox_local
+# =============================================================
+
+experiment:
+  name: pedgt_pie_ablation5_bbox_local
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 16
+  overlap: 0.6
+  overlap_eval: 0.6
+  anchor_eval: true
+  endpoint_step: 6
+  pose_dir: data/poses
+  crop_dir: data/crops
+  pose_norm: bbox_local        # <<< PROVA 5: normalizzazione frame-per-frame nel box
+
+model:
+  name: PedGT
+  in_channels: 5
+  d_model: 128
+  gcn_hidden: 64
+  spatial_out: 64
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 256
+  dropout: 0.7
+  encoder_dropout: 0.0
+  causal: false
+
+streams:
+  pose:
+    enabled: true
+    use_center_channels: false   # tiene cx,cy (costanti ~0.5 con bbox_local)
+    encoder: gcn
+    input_proj: [16]
+    input_proj_dropout: 0.0
+
+  kinematics:
+    enabled: true               # la traiettoria vive comunque qui (bbox+ego)
+    bbox_format: xyxy
+    hidden: 128
+
+  crop:
+    enabled: false
+    in_dim: 768
+    hidden: 128
+
+  fusion: late_fusion
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-5
+  weight_decay: 5.0e-5
+  patience: 20
+  grad_clip: 3.5
+  scheduler: cosine
+  plateau_factor: 0.5
+  plateau_patience: 5
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs

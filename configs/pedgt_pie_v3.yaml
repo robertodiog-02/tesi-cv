@@ -8,7 +8,7 @@
 #   Normalizzazione: reference-point (best su PIE, Tab. II)
 
 experiment:
-  name: pedgt_pie_layerDense_beforeGCN_clip3.5_kinematics_pose
+  name: pedgt_NOCONFIDENCE
   seed: 42
 
 data:
@@ -37,7 +37,7 @@ model:
   n_layers: 2
   dim_feedforward: 256
   dropout: 0.7
-  encoder_dropout: 0.1
+  encoder_dropout: 0.0
   causal: false              # true = maschera causale nell'encoder (deviazione dal paper, bidirezionale)
   # NB: use_ego_speed (iniezione additiva ego nel transformer) e' stato RIMOSSO.
   #     L'ego-speed ora vive SOLO nel ramo kinematics (streams.kinematics). Vedi sotto.
@@ -53,7 +53,7 @@ streams:
   # --- Ramo POSE: GCN a 19 giunti (come il paper) ---
   pose:
     enabled: true              # true = usa lo scheletro nella GCN
-    use_center_channels: true  # true  -> input GCN [T,19,5] = (x,y,conf,cx,cy)
+    use_center_channels: false  # true  -> input GCN [T,19,5] = (x,y,conf,cx,cy)
                                # false -> input GCN [T,19,3] = (x,y,conf); toglie
                                #          le 2 coordinate di traiettoria (center)
     input_proj: [16]           # null = input diretto a gcn1 (BASELINE, come il paper).
@@ -67,7 +67,7 @@ streams:
 
   # --- Ramo KINEMATICS: cinematica pura bbox + ego ---
   kinematics:
-    enabled: true             # true = aggiunge il ramo cinematico
+    enabled: false             # true = aggiunge il ramo cinematico
     bbox_format: xyxy          # 'xyxy'  -> (x1,y1,x2,y2)  (come le annotazioni)
                                # 'cxcywh'-> (cx,cy,w,h)
                                # In entrambi i casi: 4 feature bbox + 1 ego = 5 input

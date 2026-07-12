@@ -31,7 +31,8 @@ Min-max (best su JAAD, PedGNN) supportata per completezza.
 import numpy as np
 
 from skeleton import (LEFT_SHOULDER, RIGHT_SHOULDER,
-                      LSHO, RSHO, LHIP, RHIP, NECK, CHIP, NUM_JOINTS)
+                      LSHO, RSHO, LHIP, RHIP, NECK, CHIP, NUM_JOINTS,
+                      get_active_joints)
 
 CONF_CHANNEL = 2  # indice del canale confidence in (x, y, conf, cx, cy)
 EPS = 1e-6
@@ -158,6 +159,57 @@ def minmax_normalize(feat, img_w=1920.0, img_h=1080.0):
     return feat
 
 
+def bbox_local_perframe(feat, img_w=1920.0, img_h=1080.0, bbox_px=None):
+    """
+    VARIANTE BBOX-LOCAL — normalizzazione "classica" da skeleton action-recog.
+
+    Ogni frame e' normalizzato IN MODO INDIPENDENTE rispetto alla PROPRIA
+    bounding box: i keypoint vengono mappati nello spazio [0,1] del box.
+        x_norm = (x - x1) / w_bbox
+        y_norm = (y - y1) / h_bbox
+    dove (x1,y1) e' l'angolo alto-sinistra del box e (w,h) le sue dimensioni,
+    tutti in PIXEL per quel frame.
+
+    Effetto: la posa e' scale-invariant E position-invariant (un pedone
+    lontano/vicino con la stessa posa da' lo stesso tensore). La TRAIETTORIA
+    ASSOLUTA viene ELIMINATA di proposito: ogni frame e' agganciato al proprio
+    box, non a un riferimento comune. Utile come ablation "sola posa, niente
+    dove va il pedone".
+
+    Canali center (cx,cy): sono il centro del box, quindi dopo la mappatura
+    cadono a ~(0.5, 0.5) COSTANTE in ogni frame -> informazione quasi nulla.
+    Vengono comunque trasformati (restano coerenti con i keypoint); se non li
+    vuoi, mettili a 0 dal config con use_center_channels=false.
+
+    Richiede bbox_px: array [T,4] con la bbox in PIXEL come (x1,y1,x2,y2)
+    per ogni frame della finestra. Se assente per un frame, fallback a
+    scala = distanza spalle e riferimento = bbox-center del frame.
+    """
+    if bbox_px is None:
+        raise ValueError(
+            "bbox_local_perframe richiede bbox_px (array [T,4] in pixel, "
+            "formato x1,y1,x2,y2). Passalo con "
+            "normalize_pose(..., bbox_px=...)."
+        )
+    feat = feat.astype(np.float32).copy()
+    bbox_px = np.asarray(bbox_px, dtype=np.float32)
+    for t in range(feat.shape[0]):
+        x1, y1, x2, y2 = bbox_px[t]
+        w = x2 - x1
+        h = y2 - y1
+        # fallback robusto se il box e' degenere
+        if not np.isfinite(w) or w < EPS:
+            w = _shoulder_distance(feat[t, :, 0], feat[t, :, 1])
+        if not np.isfinite(h) or h < EPS:
+            h = w
+        feat[t, :, 0] = (feat[t, :, 0] - x1) / w
+        feat[t, :, 1] = (feat[t, :, 1] - y1) / h
+        # center (cx,cy) mappato nello stesso spazio del box -> ~0.5,0.5
+        feat[t, :, 3] = (feat[t, :, 3] - x1) / w
+        feat[t, :, 4] = (feat[t, :, 4] - y1) / h
+    return feat
+
+
 def _torso_length(x, y):
     """
     Lunghezza del torso = distanza Neck <-> CHip. Piu' robusta della distanza
@@ -269,15 +321,18 @@ _NORM_FUNCS = {
     "reference_point_perframe": reference_point_perframe, # A0 (rotta, ablation)
     "hip_reference":           hip_reference,            # C (centro anca, scala torso)
     "hip_reference_seq":       hip_reference_seq,        # D (centro bbox 1° frame, scala altezza bbox)
+    "bbox_local":              bbox_local_perframe,      # E (classica frame-per-frame, no traiettoria)
     "minmax":                  minmax_normalize,
 }
 
 # Metodi che richiedono l'altezza bbox come input aggiuntivo
 _NEEDS_BBOX_HEIGHT = {"hip_reference_seq"}
+# Metodi che richiedono la bbox completa in pixel [T,4] (x1,y1,x2,y2)
+_NEEDS_BBOX_PX = {"bbox_local"}
 
 
 def normalize_pose(feat, method="reference_point", img_w=1920.0, img_h=1080.0,
-                   bbox_height=None):
+                   bbox_height=None, bbox_px=None):
     if method in ("none", None):
         return feat.astype(np.float32)
     if method not in _NORM_FUNCS:
@@ -285,7 +340,27 @@ def normalize_pose(feat, method="reference_point", img_w=1920.0, img_h=1080.0,
                          f"Disponibili: {list(_NORM_FUNCS)} + 'none'")
     if method in _NEEDS_BBOX_HEIGHT:
         return _NORM_FUNCS[method](feat, img_w, img_h, bbox_height=bbox_height)
+    if method in _NEEDS_BBOX_PX:
+        return _NORM_FUNCS[method](feat, img_w, img_h, bbox_px=bbox_px)
     return _NORM_FUNCS[method](feat, img_w, img_h)
+
+
+def drop_head_joints(feat: np.ndarray) -> np.ndarray:
+    """
+    Rimuove i 5 nodi testa (naso, occhi, orecchie) dal tensore pose.
+
+    IMPORTANTE: va chiamata DOPO derive_19_joints, concat_center,
+    fill_missing e normalize_pose. La derivazione di Neck/CHip e la
+    reference-point normalization usano le SPALLE (e volendo le anche), che
+    NON sono nodi testa e quindi restano. Cosi' l'informazione anatomica per
+    normalizzare non viene persa: si taglia solo alla fine.
+
+    feat : [T, N, C] con N=19 (ordine giunti standard).
+    out  : [T, 14, C] con i nodi nell'ordine compatto di get_active_joints
+           (il giunto piu' alto rimasto e' il Neck).
+    """
+    active, _ = get_active_joints(exclude_head=True)
+    return np.ascontiguousarray(feat[:, active, :])
 
 
 def fill_missing(feat: np.ndarray) -> np.ndarray:

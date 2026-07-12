@@ -138,6 +138,19 @@ def _build_streams_cfg(cfg: Dict) -> Dict:
         "pose": {
             "enabled": pose_s.get("enabled", True),
             "use_center_channels": pose_s.get("use_center_channels", True),
+            "use_confidence": pose_s.get("use_confidence", True),
+            # --- ablation su encoder e struttura del grafo ---
+            "encoder": pose_s.get("encoder", "gcn"),   # gcn|graphsage|transformer
+            "exclude_head": pose_s.get("exclude_head", False),
+            "add_cross_limb": pose_s.get("add_cross_limb", False),
+            "gnn_type": pose_s.get("gnn_type", None),   # override conv GNN
+            "input_proj": pose_s.get("input_proj", None),
+            "input_proj_dropout": pose_s.get("input_proj_dropout", 0.0),
+            # parametri specifici del pose-transformer (usati se encoder=transformer)
+            "tf_heads": pose_s.get("tf_heads", 4),
+            "tf_layers": pose_s.get("tf_layers", 2),
+            "tf_dim_ff": pose_s.get("tf_dim_ff", None),
+            "tf_dropout": pose_s.get("tf_dropout", 0.1),
         },
         "kinematics": {
             "enabled": kin_s.get("enabled", False),
@@ -405,6 +418,8 @@ def main():
     pose_enabled  = pose_s.get("enabled", True)
     pose_dir_eff  = pose_dir if pose_enabled else None
     use_center_ch = pose_s.get("use_center_channels", True)
+    exclude_head  = pose_s.get("exclude_head", False)
+    use_confidence = pose_s.get("use_confidence", True)
     use_kinematics = kin_s.get("enabled", False)
     bbox_format    = kin_s.get("bbox_format", "xyxy")
     use_crop       = crop_s.get("enabled", False)
@@ -416,7 +431,8 @@ def main():
     # kwargs comuni ai 3 dataset per gli stream
     stream_kwargs = dict(
         pose_dir=pose_dir_eff, pose_norm=pose_norm,
-        use_center_channels=use_center_ch,
+        use_center_channels=use_center_ch, exclude_head=exclude_head,
+        use_confidence=use_confidence,
         use_kinematics=use_kinematics, bbox_format=bbox_format,
         crop_dir=crop_dir,
     )

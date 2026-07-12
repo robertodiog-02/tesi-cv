@@ -1,0 +1,81 @@
+# =============================================================
+# ABLATION 6 — CONFIDENCE ESCLUSA DAL GRAFO
+# =============================================================
+# Rimuove il canale confidence dai giunti: il grafo usa solo le coordinate
+# (x, y) invece di (x, y, conf). La confidence viene tolta ALLA FINE, dopo
+# derivazione di Neck/CHip e normalizzazione (che continuano a usarla per i
+# giunti derivati), quindi la qualita' della normalizzazione non cambia.
+#
+# Conteggio canali risultante (in_channels) in base ai due flag:
+#   use_confidence=true,  use_center_channels=true  -> 5 (x,y,conf,cx,cy)  [baseline]
+#   use_confidence=false, use_center_channels=true  -> 4 (x,y,cx,cy)       [questa prova]
+#   use_confidence=true,  use_center_channels=false -> 3 (x,y,conf)
+#   use_confidence=false, use_center_channels=false -> 2 (x,y)
+# in_channels e' calcolato automaticamente: NON impostarlo a mano nel model.
+#
+# Differenza vs baseline: streams.pose.use_confidence = false
+# =============================================================
+
+experiment:
+  name: pedgt_pie_ablation6_no_confidence_batchNormpre_lrabbassato
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 16
+  overlap: 0.6
+  overlap_eval: 0.6
+  anchor_eval: true
+  endpoint_step: 6
+  pose_dir: data/poses
+  crop_dir: data/crops
+  pose_norm: hip_reference_seq
+
+model:
+  name: PedGT
+  # in_channels: NON impostato -> derivato dai flag pose (qui sara' 4)
+  d_model: 128
+  gcn_hidden: 64
+  spatial_out: 64
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 256
+  dropout: 0.7
+  encoder_dropout: 0.1
+  causal: false
+
+streams:
+  pose:
+    enabled: true
+    use_center_channels: true
+    use_confidence: false       # <<< PROVA 6: rimuove il canale conf dai giunti
+    encoder: gcn
+    input_proj: [16]
+    input_proj_dropout: 0.0
+
+  kinematics:
+    enabled: false
+    bbox_format: xyxy
+    hidden: 128
+
+  crop:
+    enabled: false
+    in_dim: 768
+    hidden: 128
+
+  fusion: late_fusion
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-6
+  weight_decay: 5.0e-5
+  patience: 20
+  grad_clip: 30.0
+  scheduler: cosine
+  plateau_factor: 0.5
+  plateau_patience: 5
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs

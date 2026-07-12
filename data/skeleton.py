@@ -70,13 +70,85 @@ JOINT_EDGES = [
     (LHIP, LKNE), (LKNE, LANK),
 ]
 
+# --------------------------------------------------------------------------
+# Gruppi di nodi e edge opzionali (per le ablation configurabili)
+# --------------------------------------------------------------------------
+# Nodi "testa": naso, occhi, orecchie. Il Neck NON e' testa (e' snodo del
+# tronco) e resta sempre. Escludendo questi 5 nodi il giunto piu' alto
+# diventa il Neck (indice 17).
+HEAD_JOINTS = [NOSE, LEYE, REYE, LEAR, REAR]   # 0,1,2,3,4
+
+# Edge extra "cross-limb": gomito <-> ginocchio controlaterale.
+# Collega la catena braccio a quella della gamba opposta, dando alla GCN
+# un percorso diretto tra arti che nello scheletro anatomico standard
+# comunicano solo passando per Neck->CHip.
+CROSS_LIMB_EDGES = [
+    (RELB, LKNE),   # gomito destro  <-> ginocchio sinistro
+    (LELB, RKNE),   # gomito sinistro <-> ginocchio destro
+]
+
+
+def get_active_joints(exclude_head: bool = False):
+    """
+    Ritorna (active_indices, old2new) per il sotto-grafo richiesto.
+
+    active_indices : lista degli indici (nel sistema 0..18 originale) dei nodi
+                     tenuti, in ordine crescente.
+    old2new        : dict indice_originale -> nuovo indice compatto [0..K-1].
+
+    Con exclude_head=False ritorna tutti i 19 giunti (identita').
+    Con exclude_head=True rimuove i 5 nodi testa -> 14 giunti, Neck in cima.
+    """
+    if exclude_head:
+        drop = set(HEAD_JOINTS)
+        active = [j for j in range(NUM_JOINTS) if j not in drop]
+    else:
+        active = list(range(NUM_JOINTS))
+    old2new = {old: new for new, old in enumerate(active)}
+    return active, old2new
+
+
+def build_joint_edges(exclude_head: bool = False,
+                      add_cross_limb: bool = False):
+    """
+    Costruisce la edge-list (in indici COMPATTI del sotto-grafo) applicando
+    le opzioni di ablation:
+      - exclude_head   : rimuove i 5 nodi testa (edge che li toccano scartati)
+      - add_cross_limb : aggiunge gli edge gomito<->ginocchio controlaterale
+
+    Ritorna: (edges_compatti, num_nodi_attivi).
+    """
+    active, old2new = get_active_joints(exclude_head)
+    active_set = set(active)
+
+    edges = list(JOINT_EDGES)
+    if add_cross_limb:
+        edges = edges + list(CROSS_LIMB_EDGES)
+
+    remapped = []
+    for i, j in edges:
+        if i in active_set and j in active_set:
+            remapped.append((old2new[i], old2new[j]))
+    return remapped, len(active)
+
 
 def build_adjacency(num_joints: int = NUM_JOINTS,
                     self_loops: bool = True,
-                    normalize: bool = True) -> np.ndarray:
-    """Matrice di adiacenza dello scheletro a 19 giunti."""
+                    normalize: bool = True,
+                    exclude_head: bool = False,
+                    add_cross_limb: bool = False) -> np.ndarray:
+    """Matrice di adiacenza dello scheletro (default: 19 giunti).
+
+    exclude_head / add_cross_limb: vedi build_joint_edges. Quando una di
+    queste e' attiva, num_joints viene ricalcolato dal sotto-grafo e il
+    valore passato come argomento e' ignorato.
+    """
+    if exclude_head or add_cross_limb:
+        edges, num_joints = build_joint_edges(exclude_head, add_cross_limb)
+    else:
+        edges = JOINT_EDGES
     A = np.zeros((num_joints, num_joints), dtype=np.float32)
-    for i, j in JOINT_EDGES:
+    for i, j in edges:
         A[i, j] = 1.0
         A[j, i] = 1.0
     if self_loops:
@@ -102,14 +174,24 @@ def build_adjacency(num_joints: int = NUM_JOINTS,
     return A.astype(np.float32)
 
 
-def build_edge_index(self_loops: bool = True) -> torch.Tensor:
-    """edge_index [2, E] per PyG (grafo non orientato -> doppia direzione)."""
+def build_edge_index(self_loops: bool = True,
+                     exclude_head: bool = False,
+                     add_cross_limb: bool = False) -> torch.Tensor:
+    """edge_index [2, E] per PyG (grafo non orientato -> doppia direzione).
+
+    exclude_head / add_cross_limb: vedi build_joint_edges. Gli indici
+    restituiti sono nel sistema COMPATTO del sotto-grafo (0..K-1).
+    """
+    if exclude_head or add_cross_limb:
+        base_edges, n_nodes = build_joint_edges(exclude_head, add_cross_limb)
+    else:
+        base_edges, n_nodes = JOINT_EDGES, NUM_JOINTS
     edges = []
-    for i, j in JOINT_EDGES:
+    for i, j in base_edges:
         edges.append((i, j))
         edges.append((j, i))
     if self_loops:
-        for i in range(NUM_JOINTS):
+        for i in range(n_nodes):
             edges.append((i, i))
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
 

@@ -35,9 +35,38 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, SAGEConv, GATConv, GINConv
 
 from data.skeleton import build_edge_index, NUM_JOINTS
+
+
+# Mappa nome -> costruttore di un layer GNN message-passing.
+# Ogni entry e' una lambda (in_dim, out_dim) -> nn.Module conv.
+def _make_gnn_conv(gnn_type: str, in_dim: int, out_dim: int) -> nn.Module:
+    """Costruisce un layer di convoluzione su grafo del tipo richiesto.
+
+    gcn       : GCNConv (baseline, come il paper PedGT).
+    graphsage : SAGEConv (aggregazione mean dei vicini + skip del nodo).
+    gat       : GATConv (attenzione sugli edge, 4 head concatenate).
+    gin       : GINConv (MLP su somma dei vicini, molto espressivo).
+    """
+    g = gnn_type.lower()
+    if g in ("gcn", "gcnconv"):
+        return GCNConv(in_dim, out_dim)
+    if g in ("graphsage", "sage", "sageconv"):
+        return SAGEConv(in_dim, out_dim)
+    if g in ("gat", "gatconv"):
+        # heads=4 concatenate -> out_dim deve essere divisibile per 4
+        heads = 4
+        assert out_dim % heads == 0, \
+            f"GAT: out_dim ({out_dim}) deve essere divisibile per heads ({heads})"
+        return GATConv(in_dim, out_dim // heads, heads=heads, concat=True)
+    if g in ("gin", "ginconv"):
+        mlp = nn.Sequential(nn.Linear(in_dim, out_dim), nn.ReLU(),
+                            nn.Linear(out_dim, out_dim))
+        return GINConv(mlp)
+    raise ValueError(f"gnn_type non supportato: {gnn_type} "
+                     f"(usa gcn|graphsage|gat|gin)")
 
 
 # ============================================================ STREAM ENCODERS
@@ -57,8 +86,11 @@ class PedGTSpatial(nn.Module):
 
     def __init__(self, in_channels: int = 5, gcn_hidden: int = 64,
                  spatial_out: int = 64, d_model: int = 128,
-                 input_proj=None, input_proj_dropout: float = 0.0):
+                 input_proj=None, input_proj_dropout: float = 0.0,
+                 gnn_type: str = "gcn",
+                 exclude_head: bool = False, add_cross_limb: bool = False):
         super().__init__()
+        self.gnn_type = gnn_type
         # -- input projection per-nodo (opzionale) --------------------------
         gcn_in = in_channels
         self.input_proj = None
@@ -73,14 +105,19 @@ class PedGTSpatial(nn.Module):
             self.input_proj = nn.Sequential(*layers)
             gcn_in = prev                       # gcn1 riceve l'ultima dim proiettata
 
-        self.gcn1 = GCNConv(gcn_in, gcn_hidden)
-        self.gcn2 = GCNConv(gcn_hidden, gcn_hidden)
-        self.gcn3 = GCNConv(gcn_hidden, spatial_out)
+        # Triplet di conv su grafo del tipo scelto (gcn/graphsage/gat/gin).
+        # I nomi restano gcn1/2/3 per compatibilita' col logging per-layer.
+        self.bn0 = nn.BatchNorm1d(in_channels)
+        self.gcn1 = _make_gnn_conv(gnn_type, gcn_in, gcn_hidden)
+        self.gcn2 = _make_gnn_conv(gnn_type, gcn_hidden, gcn_hidden)
+        self.gcn3 = _make_gnn_conv(gnn_type, gcn_hidden, spatial_out)
         self.bn1 = nn.BatchNorm1d(gcn_hidden)
         self.bn2 = nn.BatchNorm1d(gcn_hidden)
         self.proj = nn.Linear(spatial_out, d_model)
 
-        edge_index = build_edge_index(self_loops=True)
+        edge_index = build_edge_index(self_loops=True,
+                                      exclude_head=exclude_head,
+                                      add_cross_limb=add_cross_limb)
         self.register_buffer("edge_index", edge_index)
 
     def forward(self, x_nodes: torch.Tensor) -> torch.Tensor:
@@ -88,10 +125,12 @@ class PedGTSpatial(nn.Module):
         M, N, C = x_nodes.shape
         x = x_nodes.reshape(M * N, C)
         # proiezione per-nodo prima della GCN (se attiva)
+        x = self.bn0(x)
         if self.input_proj is not None:
             x = self.input_proj(x)
         ei = self._batched_edge_index(M, N, x.device)
 
+        
         h = F.relu(self.bn1(self.gcn1(x, ei)))
         h = F.relu(self.bn2(self.gcn2(h, ei)))
         h = F.relu(self.gcn3(h, ei))
@@ -108,15 +147,83 @@ class PedGTSpatial(nn.Module):
         return ei_rep
 
 
+class PoseTransformerSpatial(nn.Module):
+    """Encoder spaziale attention-only sui giunti (stile PoseFormer).
+
+    Nessuna GCN: i J giunti di un frame diventano una sequenza di J token;
+    un Transformer encoder li mette in relazione via self-attention (l'
+    attenzione impara da sola quali giunti interagiscono, senza scheletro
+    fisso). Un embedding per-giunto apprendibile fa da 'posizione' spaziale.
+
+    Aggregazione finale sui giunti: mean-pool -> proiezione a d_model.
+    Firma I/O identica a PedGTSpatial: [M, J, C] -> [M, d_model], cosi'
+    e' intercambiabile dentro PoseStream.
+    """
+
+    def __init__(self, in_channels: int = 5, d_model: int = 128,
+                 num_joints: int = NUM_JOINTS, n_heads: int = 4,
+                 n_layers: int = 2, dim_ff: Optional[int] = None,
+                 dropout: float = 0.1, embed_dim: Optional[int] = None):
+        super().__init__()
+        embed_dim = embed_dim or d_model
+        dim_ff = dim_ff or (2 * embed_dim)
+        self.in_proj = nn.Linear(in_channels, embed_dim)     # per-giunto
+        # embedding posizionale per giunto (una riga per giunto)
+        self.joint_embed = nn.Parameter(torch.zeros(1, num_joints, embed_dim))
+        nn.init.trunc_normal_(self.joint_embed, std=0.02)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=n_heads, dim_feedforward=dim_ff,
+            dropout=dropout, activation="relu", batch_first=True)
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.proj = nn.Linear(embed_dim, d_model)
+
+    def forward(self, x_nodes: torch.Tensor) -> torch.Tensor:
+        """x_nodes : [M, J, C] (M = B*T). return [M, d_model]."""
+        M, J, C = x_nodes.shape
+        h = self.in_proj(x_nodes)                    # [M, J, embed]
+        h = h + self.joint_embed[:, :J, :]
+        h = self.encoder(h)                          # [M, J, embed]
+        h = self.norm(h)
+        h = h.mean(dim=1)                            # pool sui giunti
+        return self.proj(h)                          # [M, d_model]
+
+
 class PoseStream(nn.Module):
-    """Wrapper: [B,T,19,C] -> [B,T,d_model]."""
+    """Wrapper: [B,T,J,C] -> [B,T,d_model].
+
+    L'encoder spaziale (per-frame) e' selezionabile:
+      encoder='gcn'|'graphsage'|'gat'|'gin' -> PedGTSpatial (message passing);
+      encoder='transformer'                 -> PoseTransformerSpatial (attn).
+    """
 
     def __init__(self, in_channels, gcn_hidden, spatial_out, d_model,
-                 input_proj=None, input_proj_dropout: float = 0.0):
+                 input_proj=None, input_proj_dropout: float = 0.0,
+                 encoder: str = "gcn", gnn_type: Optional[str] = None,
+                 exclude_head: bool = False, add_cross_limb: bool = False,
+                 num_joints: int = NUM_JOINTS,
+                 tf_heads: int = 4, tf_layers: int = 2,
+                 tf_dim_ff: Optional[int] = None, tf_dropout: float = 0.1):
         super().__init__()
-        self.spatial = PedGTSpatial(in_channels, gcn_hidden, spatial_out,
-                                    d_model, input_proj=input_proj,
-                                    input_proj_dropout=input_proj_dropout)
+        self.encoder_kind = encoder.lower()
+        if self.encoder_kind == "transformer":
+            self.spatial = PoseTransformerSpatial(
+                in_channels=in_channels, d_model=d_model,
+                num_joints=num_joints, n_heads=tf_heads, n_layers=tf_layers,
+                dim_ff=tf_dim_ff, dropout=tf_dropout)
+        else:
+            # encoder message-passing; 'encoder' stesso nomina il conv se
+            # gnn_type non e' dato esplicitamente (es. encoder='graphsage').
+            gt = gnn_type or self.encoder_kind
+            if gt == "gcn" or gt in ("graphsage", "gat", "gin"):
+                pass
+            else:
+                gt = "gcn"
+            self.spatial = PedGTSpatial(
+                in_channels, gcn_hidden, spatial_out, d_model,
+                input_proj=input_proj, input_proj_dropout=input_proj_dropout,
+                gnn_type=gt, exclude_head=exclude_head,
+                add_cross_limb=add_cross_limb)
 
     def forward(self, keypoints: torch.Tensor) -> torch.Tensor:
         B, T, N, C = keypoints.shape
@@ -258,15 +365,30 @@ class PedGT(nn.Module):
         for k in self.active:
             cfg = streams_cfg.get(k, {})
             if k == "pose":
-                # use_center_channels decide 5 (x,y,conf,cx,cy) vs 3 (x,y,conf).
-                # 'in_channels' nel cfg dello stream e' un override esplicito
-                # (ha la precedenza) per casi speciali.
-                pose_ch = 5 if cfg.get("use_center_channels", True) else 3
+                # Canali pose: x,y (2) + conf (se use_confidence) + cx,cy
+                # (se use_center_channels). 'in_channels' resta override esplicito.
+                pose_ch = 2
+                if cfg.get("use_confidence", True):
+                    pose_ch += 1
+                if cfg.get("use_center_channels", True):
+                    pose_ch += 2
                 pose_ch = cfg.get("in_channels", pose_ch)
+                exclude_head   = cfg.get("exclude_head", False)
+                add_cross_limb = cfg.get("add_cross_limb", False)
+                # num giunti attivi (14 se testa esclusa, altrimenti 19)
+                n_joints = 14 if exclude_head else NUM_JOINTS
                 self.encoders["pose"] = PoseStream(
                     pose_ch, gcn_hidden, spatial_out, d_model,
                     input_proj=cfg.get("input_proj", None),
-                    input_proj_dropout=cfg.get("input_proj_dropout", 0.0))
+                    input_proj_dropout=cfg.get("input_proj_dropout", 0.0),
+                    encoder=cfg.get("encoder", "gcn"),
+                    gnn_type=cfg.get("gnn_type", None),
+                    exclude_head=exclude_head, add_cross_limb=add_cross_limb,
+                    num_joints=n_joints,
+                    tf_heads=cfg.get("tf_heads", 4),
+                    tf_layers=cfg.get("tf_layers", 2),
+                    tf_dim_ff=cfg.get("tf_dim_ff", None),
+                    tf_dropout=cfg.get("tf_dropout", 0.1))
             elif k == "kinematics":
                 self.encoders["kinematics"] = MLPStream(
                     cfg.get("in_dim", 5), d_model,

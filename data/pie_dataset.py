@@ -274,6 +274,8 @@ class PIEDataset(Dataset):
         pose_dir:       str  = None,
         pose_norm:      str  = "reference_point",
         use_center_channels: bool = True,
+        use_confidence: bool = True,    # False -> rimuove il canale conf dai giunti
+        exclude_head:   bool = False,   # rimuove i 5 nodi testa -> 14 giunti
         # --- kinematics stream ---
         use_kinematics: bool = False,
         bbox_format:    str  = "xyxy",
@@ -315,7 +317,14 @@ class PIEDataset(Dataset):
         self.use_pose = pose_dir is not None
         self.pose_norm = pose_norm
         self.use_center_channels = use_center_channels
+        self.use_confidence = use_confidence
+        self.exclude_head = exclude_head
         self._pose_cache = None
+        if self.use_pose and not use_confidence:
+            print("  [Pose] use_confidence=False -> canale conf rimosso dai giunti")
+        if self.use_pose and exclude_head:
+            print("  [Pose] exclude_head=True -> 14 giunti (testa rimossa, "
+                  "Neck in cima)")
         if self.use_pose:
             from pose_cache import PoseCache
             self._pose_cache = PoseCache(pose_dir, set_ids=split_sets)
@@ -366,12 +375,19 @@ class PIEDataset(Dataset):
         """Costruisce il tensore pose [T,19,C] per un sample (normalizzato).
         C = 5 (x,y,conf,cx,cy) oppure 3 (x,y,conf) se use_center_channels=False."""
         from pose_preproc import (derive_19_joints, concat_center,
-                                  normalize_pose, fill_missing)
+                                  normalize_pose, fill_missing,
+                                  drop_head_joints)
         T = s["bbox"].shape[0]
-        C = 5 if self.use_center_channels else 3
+        # canali attivi: (x,y) sempre; conf se use_confidence; (cx,cy) se center
+        C = 2
+        if self.use_confidence:
+            C += 1
+        if self.use_center_channels:
+            C += 2
+        N = 14 if self.exclude_head else 19
         if (not self.use_pose) or s["frames"] is None or \
                 not self._pose_cache.has_track(s["set_id"], s["video_id"], s["ped_id"]):
-            return torch.zeros((T, 19, C), dtype=torch.float32)
+            return torch.zeros((T, N, C), dtype=torch.float32)
 
         kp17, _ = self._pose_cache.get_window(
             s["set_id"], s["video_id"], s["ped_id"], s["frames"], fill="nan")
@@ -386,9 +402,18 @@ class PIEDataset(Dataset):
         feat = fill_missing(feat)
         feat = normalize_pose(feat, method=self.pose_norm,
                               img_w=IMG_W, img_h=IMG_H,
-                              bbox_height=bbox_height)   # [T,19,5]
-        if not self.use_center_channels:
-            feat = feat[:, :, :3]                       # drop cx,cy -> [T,19,3]
+                              bbox_height=bbox_height,
+                              bbox_px=bbox_px)             # [T,19,5]
+        if self.exclude_head:
+            feat = drop_head_joints(feat)               # [T,14,5]
+        # selezione canali dal layout normalizzato (x,y,conf,cx,cy):
+        #   x,y sempre; conf solo se use_confidence; cx,cy solo se center.
+        keep = [0, 1]                                   # x, y
+        if self.use_confidence:
+            keep.append(2)                              # conf
+        if self.use_center_channels:
+            keep += [3, 4]                              # cx, cy
+        feat = feat[:, :, keep]                         # [T, N, C]
         return torch.from_numpy(np.ascontiguousarray(feat))
 
     # ----------------------------------------------------------- kinematics

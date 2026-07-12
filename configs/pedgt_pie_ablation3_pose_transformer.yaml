@@ -1,0 +1,83 @@
+# =============================================================
+# ABLATION 3 — POSE TRANSFORMER (attention-only, niente GCN)
+# =============================================================
+# Sostituisce l'encoder spaziale della posa: invece della GCN a 3 layer,
+# usa un Transformer encoder sui giunti (stile PoseFormer). I J giunti di
+# ogni frame diventano J token; la self-attention impara da sola quali
+# giunti interagiscono, SENZA scheletro/adiacenza fissa. Un embedding
+# per-giunto apprendibile fa da posizione spaziale.
+#
+# Aggregazione sui giunti: mean-pool -> proiezione a d_model.
+# NB: con encoder=transformer i parametri del grafo (add_cross_limb) sono
+#     ignorati (non c'e' adiacenza). exclude_head resta valido (agisce sul
+#     tensore in ingresso, quindi il transformer vedrebbe 14 token).
+#
+# Differenza vs baseline: streams.pose.encoder = transformer (+ tf_*)
+# =============================================================
+
+experiment:
+  name: pedgt_pie_ablation3_pose_transformer
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 16
+  overlap: 0.6
+  overlap_eval: 0.6
+  anchor_eval: true
+  endpoint_step: 6
+  pose_dir: data/poses
+  crop_dir: data/crops
+  pose_norm: hip_reference_seq
+
+model:
+  name: PedGT
+  in_channels: 5
+  d_model: 128
+  gcn_hidden: 64             # ignorato dall'encoder transformer (tenuto per compat.)
+  spatial_out: 64            # idem
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 256
+  dropout: 0.7
+  encoder_dropout: 0.1
+  causal: false
+
+streams:
+  pose:
+    enabled: true
+    use_center_channels: true
+    encoder: transformer      # <<< PROVA 3: attention-only sui giunti (no GCN)
+    # iperparametri del pose-transformer SPAZIALE (per-frame):
+    tf_heads: 4               # teste di attenzione sui giunti
+    tf_layers: 2              # profondita' del transformer spaziale
+    tf_dim_ff: 256            # feedforward interno (null -> 2*embed_dim)
+    tf_dropout: 0.1
+    # exclude_head: false     # opz.: attivalo per il transformer su 14 giunti
+
+  kinematics:
+    enabled: true
+    bbox_format: xyxy
+    hidden: 128
+
+  crop:
+    enabled: false
+    in_dim: 768
+    hidden: 128
+
+  fusion: cross_attention
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-5
+  weight_decay: 5.0e-5
+  patience: 20
+  grad_clip: 3.5
+  scheduler: cosine
+  plateau_factor: 0.5
+  plateau_patience: 5
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs
