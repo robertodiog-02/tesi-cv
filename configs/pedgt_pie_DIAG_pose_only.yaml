@@ -1,0 +1,76 @@
+# =============================================================
+# DIAGNOSTICA A — SOLO POSE (kinematics OFF)
+# =============================================================
+# Scopo: capire perche' tutte le ablation convergono agli stessi valori.
+# Ipotesi: il ramo KINEMATICS (bbox+ego) domina la predizione su PIE, quindi
+# maschera qualunque modifica al ramo POSE. Disattivandolo, le differenze tra
+# le ablation della posa (encoder, testa, smoothing, normalizzazione) tornano
+# visibili.
+#
+# USO: lancia QUESTO config cambiando di volta in volta SOLO il parametro
+# della posa che vuoi testare (encoder, exclude_head, smooth, pose_norm...) e
+# confronta. Se qui le differenze compaiono ma con kinematics ON spariscono,
+# allora la conclusione e': "sul ramo pose l'ablation conta, ma la cinematica
+# la domina nel modello completo".
+# =============================================================
+
+experiment:
+  name: pedgt_pie_DIAG_pose_only
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 16
+  overlap: 0.6
+  overlap_eval: 0.6
+  anchor_eval: true
+  endpoint_step: 6
+  pose_dir: data/poses
+  crop_dir: data/crops
+  pose_norm: hip_reference_seq
+
+model:
+  name: PedGT
+  in_channels: 5
+  d_model: 128
+  gcn_hidden: 64
+  spatial_out: 64
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 256
+  dropout: 0.7
+  encoder_dropout: 0.1
+  causal: false
+
+streams:
+  pose:
+    enabled: true
+    use_center_channels: true
+    encoder: gcn                # <-- cambia QUESTO (gcn|graphsage|transformer) e confronta
+    # exclude_head: true        # <-- oppure prova questo
+    # smooth: median_gaussian   # <-- oppure questo
+    input_proj: [16]
+    input_proj_dropout: 0.0
+
+  kinematics:
+    enabled: false              # <<< OFF: isola il ramo pose
+
+  crop:
+    enabled: false
+
+  fusion: concat_tokens         # con un solo stream, concat_tokens = PedGT originale
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-5
+  weight_decay: 5.0e-5
+  patience: 20
+  grad_clip: 3.5
+  scheduler: cosine
+  plateau_factor: 0.5
+  plateau_patience: 5
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs

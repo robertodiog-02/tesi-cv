@@ -1,0 +1,81 @@
+# =============================================================
+# ABLATION 7 — RESIDUAL / SKIP CONNECTIONS nella GCN (PedGT Fig. 2b)
+# =============================================================
+# Aggiunge le skip connections del paper originale: ogni blocco GCN ha un
+# ramo di shortcut che si somma all'uscita PRIMA della ReLU (element-wise
+# add). Nel paper lo shortcut e' un Conv2D di proiezione; qui e' un Linear
+# per-nodo quando i canali cambiano (proj shortcut, come ResNet) e
+# l'identita' quando gia' combaciano (identity shortcut, zero parametri).
+#
+#   out_blocco = ReLU( BN(GCN(x)) + shortcut(x) )
+#
+# Effetto: percorso diretto per il gradiente -> training piu' stabile dei 3
+# layer GCN, meno rischio di degradazione del segnale. Costo in parametri
+# minimo (solo il 1o blocco cambia canali -> un Linear in_channels->64).
+#
+# Differenza vs baseline: streams.pose.residual = true
+# =============================================================
+
+experiment:
+  name: pedgt_pie_ablation7_residual
+  seed: 42
+
+data:
+  annotation_root: /Users/robertodioguardi/Desktop/PIE
+  obs_len: 16
+  overlap: 0.6
+  overlap_eval: 0.6
+  anchor_eval: true
+  endpoint_step: 6
+  pose_dir: data/poses
+  crop_dir: data/crops
+  pose_norm: hip_reference_seq
+
+model:
+  name: PedGT
+  in_channels: 5
+  d_model: 128
+  gcn_hidden: 64
+  spatial_out: 64
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 256
+  dropout: 0.7
+  encoder_dropout: 0.1
+  causal: false
+
+streams:
+  pose:
+    enabled: true
+    use_center_channels: true
+    residual: true              # <<< PROVA 7: skip connections nella GCN (Fig 2b)
+    encoder: gcn
+    input_proj: [16]
+    input_proj_dropout: 0.0
+
+  kinematics:
+    enabled: false
+    bbox_format: xyxy
+    hidden: 128
+
+  crop:
+    enabled: false
+    in_dim: 768
+    hidden: 128
+
+  fusion: late_fusion
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-5
+  weight_decay: 5.0e-5
+  patience: 20
+  grad_clip: 3.5
+  scheduler: none
+  plateau_factor: 0.5
+  plateau_patience: 5
+
+output:
+  checkpoint_dir: checkpoints
+  log_dir: logs

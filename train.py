@@ -141,6 +141,7 @@ def _build_streams_cfg(cfg: Dict) -> Dict:
             "use_confidence": pose_s.get("use_confidence", True),
             # --- ablation su encoder e struttura del grafo ---
             "encoder": pose_s.get("encoder", "gcn"),   # gcn|graphsage|transformer
+            "residual": pose_s.get("residual", False),  # skip connections (Fig 2b)
             "exclude_head": pose_s.get("exclude_head", False),
             "add_cross_limb": pose_s.get("add_cross_limb", False),
             "gnn_type": pose_s.get("gnn_type", None),   # override conv GNN
@@ -420,6 +421,9 @@ def main():
     use_center_ch = pose_s.get("use_center_channels", True)
     exclude_head  = pose_s.get("exclude_head", False)
     use_confidence = pose_s.get("use_confidence", True)
+    pose_smooth        = pose_s.get("smooth", "none")
+    pose_smooth_window = pose_s.get("smooth_window", 5)
+    pose_smooth_median = pose_s.get("smooth_median_window", 3)
     use_kinematics = kin_s.get("enabled", False)
     bbox_format    = kin_s.get("bbox_format", "xyxy")
     use_crop       = crop_s.get("enabled", False)
@@ -433,6 +437,8 @@ def main():
         pose_dir=pose_dir_eff, pose_norm=pose_norm,
         use_center_channels=use_center_ch, exclude_head=exclude_head,
         use_confidence=use_confidence,
+        pose_smooth=pose_smooth, pose_smooth_window=pose_smooth_window,
+        pose_smooth_median_window=pose_smooth_median,
         use_kinematics=use_kinematics, bbox_format=bbox_format,
         crop_dir=crop_dir,
     )

@@ -275,6 +275,9 @@ class PIEDataset(Dataset):
         pose_norm:      str  = "reference_point",
         use_center_channels: bool = True,
         use_confidence: bool = True,    # False -> rimuove il canale conf dai giunti
+        pose_smooth:    str  = "none",  # smoothing keypoint: none|sma|gaussian|median|median_gaussian
+        pose_smooth_window: int = 5,    # finestra media (sma/gaussian)
+        pose_smooth_median_window: int = 3,  # finestra mediana (median/median_gaussian)
         exclude_head:   bool = False,   # rimuove i 5 nodi testa -> 14 giunti
         # --- kinematics stream ---
         use_kinematics: bool = False,
@@ -318,10 +321,17 @@ class PIEDataset(Dataset):
         self.pose_norm = pose_norm
         self.use_center_channels = use_center_channels
         self.use_confidence = use_confidence
+        self.pose_smooth = pose_smooth
+        self.pose_smooth_window = pose_smooth_window
+        self.pose_smooth_median_window = pose_smooth_median_window
         self.exclude_head = exclude_head
         self._pose_cache = None
         if self.use_pose and not use_confidence:
             print("  [Pose] use_confidence=False -> canale conf rimosso dai giunti")
+        if self.use_pose and pose_smooth not in ("none", None):
+            print(f"  [Pose] smoothing keypoint: {pose_smooth} "
+                  f"(window={pose_smooth_window}, "
+                  f"median_window={pose_smooth_median_window})")
         if self.use_pose and exclude_head:
             print("  [Pose] exclude_head=True -> 14 giunti (testa rimossa, "
                   "Neck in cima)")
@@ -376,7 +386,7 @@ class PIEDataset(Dataset):
         C = 5 (x,y,conf,cx,cy) oppure 3 (x,y,conf) se use_center_channels=False."""
         from pose_preproc import (derive_19_joints, concat_center,
                                   normalize_pose, fill_missing,
-                                  drop_head_joints)
+                                  drop_head_joints, smooth_keypoints)
         T = s["bbox"].shape[0]
         # canali attivi: (x,y) sempre; conf se use_confidence; (cx,cy) se center
         C = 2
@@ -392,6 +402,12 @@ class PIEDataset(Dataset):
         kp17, _ = self._pose_cache.get_window(
             s["set_id"], s["video_id"], s["ped_id"], s["frames"], fill="nan")
         kp19 = derive_19_joints(kp17)                 # [T,19,3]
+        # smoothing temporale anti-jitter sui keypoint (x,y), PRIMA di center
+        # e normalizzazione; NaN-safe, la confidence resta intatta.
+        if self.pose_smooth not in ("none", None):
+            kp19 = smooth_keypoints(kp19, method=self.pose_smooth,
+                                    window=self.pose_smooth_window,
+                                    median_window=self.pose_smooth_median_window)
         bbox_px = s["bbox"].copy()
         bbox_px[:, [0, 2]] *= IMG_W
         bbox_px[:, [1, 3]] *= IMG_H

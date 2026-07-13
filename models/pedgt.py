@@ -88,9 +88,11 @@ class PedGTSpatial(nn.Module):
                  spatial_out: int = 64, d_model: int = 128,
                  input_proj=None, input_proj_dropout: float = 0.0,
                  gnn_type: str = "gcn",
-                 exclude_head: bool = False, add_cross_limb: bool = False):
+                 exclude_head: bool = False, add_cross_limb: bool = False,
+                 residual: bool = False):
         super().__init__()
         self.gnn_type = gnn_type
+        self.residual = residual
         # -- input projection per-nodo (opzionale) --------------------------
         gcn_in = in_channels
         self.input_proj = None
@@ -107,13 +109,27 @@ class PedGTSpatial(nn.Module):
 
         # Triplet di conv su grafo del tipo scelto (gcn/graphsage/gat/gin).
         # I nomi restano gcn1/2/3 per compatibilita' col logging per-layer.
-        self.bn0 = nn.BatchNorm1d(in_channels)
         self.gcn1 = _make_gnn_conv(gnn_type, gcn_in, gcn_hidden)
         self.gcn2 = _make_gnn_conv(gnn_type, gcn_hidden, gcn_hidden)
         self.gcn3 = _make_gnn_conv(gnn_type, gcn_hidden, spatial_out)
         self.bn1 = nn.BatchNorm1d(gcn_hidden)
         self.bn2 = nn.BatchNorm1d(gcn_hidden)
         self.proj = nn.Linear(spatial_out, d_model)
+
+        # -- skip / residual connections (pattern PedGT Fig. 2b) ------------
+        # Ogni blocco GCN ha un ramo di shortcut che si somma all'uscita PRIMA
+        # della ReLU (element-wise add del paper). Il ramo Conv2D del paper e'
+        # una proiezione di shortcut: qui usiamo un Linear per-nodo quando i
+        # canali cambiano (proj shortcut, come ResNet), altrimenti l'identita'
+        # (identity shortcut, zero parametri). Da' al gradiente un percorso
+        # diretto -> stabilita' e training piu' facile dei 3 layer GCN.
+        if residual:
+            self.skip1 = (nn.Linear(gcn_in, gcn_hidden)
+                          if gcn_in != gcn_hidden else nn.Identity())
+            # blocco 2: gcn_hidden->gcn_hidden, canali invariati -> identita'
+            self.skip2 = nn.Identity()
+            self.skip3 = (nn.Linear(gcn_hidden, spatial_out)
+                          if gcn_hidden != spatial_out else nn.Identity())
 
         edge_index = build_edge_index(self_loops=True,
                                       exclude_head=exclude_head,
@@ -125,15 +141,20 @@ class PedGTSpatial(nn.Module):
         M, N, C = x_nodes.shape
         x = x_nodes.reshape(M * N, C)
         # proiezione per-nodo prima della GCN (se attiva)
-        x = self.bn0(x)
         if self.input_proj is not None:
             x = self.input_proj(x)
         ei = self._batched_edge_index(M, N, x.device)
 
-        
-        h = F.relu(self.bn1(self.gcn1(x, ei)))
-        h = F.relu(self.bn2(self.gcn2(h, ei)))
-        h = F.relu(self.gcn3(h, ei))
+        if self.residual:
+            # pattern PedGT Fig. 2b: out = ReLU( BN(GCN(x)) + shortcut(x) )
+            # lo shortcut somma l'ingresso del blocco all'uscita PRIMA della ReLU
+            h = F.relu(self.bn1(self.gcn1(x, ei)) + self.skip1(x))
+            h = F.relu(self.bn2(self.gcn2(h, ei)) + self.skip2(h))
+            h = F.relu(self.gcn3(h, ei) + self.skip3(h))
+        else:
+            h = F.relu(self.bn1(self.gcn1(x, ei)))
+            h = F.relu(self.bn2(self.gcn2(h, ei)))
+            h = F.relu(self.gcn3(h, ei))
 
         h = h.view(M, N, -1)
         h_sm = h.max(dim=1).values
@@ -203,7 +224,8 @@ class PoseStream(nn.Module):
                  exclude_head: bool = False, add_cross_limb: bool = False,
                  num_joints: int = NUM_JOINTS,
                  tf_heads: int = 4, tf_layers: int = 2,
-                 tf_dim_ff: Optional[int] = None, tf_dropout: float = 0.1):
+                 tf_dim_ff: Optional[int] = None, tf_dropout: float = 0.1,
+                 residual: bool = False):
         super().__init__()
         self.encoder_kind = encoder.lower()
         if self.encoder_kind == "transformer":
@@ -223,7 +245,7 @@ class PoseStream(nn.Module):
                 in_channels, gcn_hidden, spatial_out, d_model,
                 input_proj=input_proj, input_proj_dropout=input_proj_dropout,
                 gnn_type=gt, exclude_head=exclude_head,
-                add_cross_limb=add_cross_limb)
+                add_cross_limb=add_cross_limb, residual=residual)
 
     def forward(self, keypoints: torch.Tensor) -> torch.Tensor:
         B, T, N, C = keypoints.shape
@@ -388,7 +410,8 @@ class PedGT(nn.Module):
                     tf_heads=cfg.get("tf_heads", 4),
                     tf_layers=cfg.get("tf_layers", 2),
                     tf_dim_ff=cfg.get("tf_dim_ff", None),
-                    tf_dropout=cfg.get("tf_dropout", 0.1))
+                    tf_dropout=cfg.get("tf_dropout", 0.1),
+                    residual=cfg.get("residual", False))
             elif k == "kinematics":
                 self.encoders["kinematics"] = MLPStream(
                     cfg.get("in_dim", 5), d_model,

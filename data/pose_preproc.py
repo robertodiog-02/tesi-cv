@@ -59,6 +59,127 @@ def derive_19_joints(kp17: np.ndarray) -> np.ndarray:
     return out
 
 
+# ==========================================================================
+# Smoothing temporale dei keypoint (anti-jitter di pose detection)
+# ==========================================================================
+# HRNet stima la posa frame-per-frame in modo indipendente -> i giunti
+# "tremano" anche a pedone fermo, e a volte sputano outlier (un giunto che
+# schizza lontano per un frame). Un filtro temporale sulle coordinate (x,y)
+# smorza il jitter. IMPORTANTE:
+#   - si filtra SOLO (x,y), NON la confidence (canale 2);
+#   - si filtra PRIMA della normalizzazione, sulle coordinate in PIXEL;
+#   - e' NaN-safe: i frame senza posa (NaN) non inquinano la media e restano
+#     NaN (li ricostruisce dopo fill_missing);
+#   - i filtri sono CENTRATI (non causali) -> nessun lag netto. In inferenza
+#     online causale servirebbe una variante one-sided: qui, con finestre di
+#     osservazione gia' complete, il centrato e' corretto e piu' accurato.
+
+def _nan_moving_average(x, k, weights=None):
+    """Media mobile centrata NaN-safe su asse 0 (tempo).
+
+    x       : [T, ...] float
+    k       : ampiezza finestra (dispari; se pari -> k+1)
+    weights : pesi [k] opzionali (es. gaussiani); None -> media piatta.
+    Ritorna [T, ...]. Dove la finestra e' tutta NaN, resta NaN.
+    """
+    T = x.shape[0]
+    if k < 2 or T == 0:
+        return x.copy()
+    if k % 2 == 0:
+        k += 1
+    r = k // 2
+    if weights is None:
+        weights = np.ones(k, dtype=np.float64)
+    else:
+        weights = np.asarray(weights, dtype=np.float64)
+    out = np.empty_like(x, dtype=np.float32)
+    for t in range(T):
+        lo, hi = max(0, t - r), min(T, t + r + 1)
+        win = x[lo:hi]                                   # [w, ...]
+        w = weights[(lo - (t - r)):(k - ((t + r + 1) - hi))]
+        w = w.reshape((-1,) + (1,) * (x.ndim - 1))       # broadcast
+        valid = np.isfinite(win)
+        wv = np.where(valid, w, 0.0)
+        num = np.nansum(np.where(valid, win * w, 0.0), axis=0)
+        den = wv.sum(axis=0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            avg = num / den
+        avg = np.where(den > 0, avg, np.nan)
+        out[t] = avg.astype(np.float32)
+    return out
+
+
+def _nan_median(x, k):
+    """Mediana mobile centrata NaN-safe su asse 0 (tempo). Uccide gli outlier."""
+    T = x.shape[0]
+    if k < 2 or T == 0:
+        return x.copy()
+    if k % 2 == 0:
+        k += 1
+    r = k // 2
+    out = np.empty_like(x, dtype=np.float32)
+    for t in range(T):
+        lo, hi = max(0, t - r), min(T, t + r + 1)
+        win = x[lo:hi]
+        with np.errstate(invalid="ignore"):
+            med = np.nanmedian(win, axis=0)
+        out[t] = med.astype(np.float32)
+    # np.nanmedian su colonna tutta-NaN da' nan (con warning gia' silenziato)
+    return out
+
+
+def _gaussian_weights(k, sigma=None):
+    if k % 2 == 0:
+        k += 1
+    r = k // 2
+    if sigma is None:
+        sigma = max(k / 6.0, 1e-3)      # ~99% della massa dentro la finestra
+    idx = np.arange(-r, r + 1, dtype=np.float64)
+    w = np.exp(-(idx ** 2) / (2 * sigma ** 2))
+    return w / w.sum()
+
+
+def smooth_keypoints(kp, method="median_gaussian", window=5,
+                     median_window=3, sigma=None):
+    """
+    Filtra temporalmente SOLO le coordinate (x,y) dei keypoint. La confidence
+    (canale 2) e ogni canale >=2 restano intatti.
+
+    kp     : [T, N, 3+] (x, y, conf, ...) in pixel, NaN dove la posa manca.
+    method : 'sma'            -> media mobile semplice (finestra=window)
+             'gaussian'       -> media pesata gaussiana (finestra=window)
+             'median'         -> mediana mobile (finestra=median_window)
+             'median_gaussian'-> mediana(median_window) poi gaussiana(window)
+                                 [DEFAULT: robusto a outlier + jitter fine]
+             'none'/None      -> nessun filtro
+    window        : ampiezza del filtro di media (sma/gaussian).
+    median_window : ampiezza del pre-filtro mediana (per median/median_gaussian).
+    sigma         : sigma della gaussiana (None -> derivata da window).
+
+    Ritorna un nuovo array [T, N, 3+]; NaN preservati dove la finestra e'
+    tutta mancante (poi ci pensa fill_missing).
+    """
+    if method in ("none", None):
+        return kp
+    kp = kp.astype(np.float32).copy()
+    xy = kp[:, :, :2]                                    # [T, N, 2]
+
+    if method == "sma":
+        xy = _nan_moving_average(xy, window)
+    elif method == "gaussian":
+        xy = _nan_moving_average(xy, window, weights=_gaussian_weights(window, sigma))
+    elif method == "median":
+        xy = _nan_median(xy, median_window)
+    elif method == "median_gaussian":
+        xy = _nan_median(xy, median_window)
+        xy = _nan_moving_average(xy, window, weights=_gaussian_weights(window, sigma))
+    else:
+        raise ValueError(f"smooth method non supportato: {method}. "
+                         f"Usa sma|gaussian|median|median_gaussian|none")
+    kp[:, :, :2] = xy
+    return kp
+
+
 def concat_center(keypoints: np.ndarray, center: np.ndarray) -> np.ndarray:
     """
     keypoints : [T, 19, 3]  (x, y, conf) in pixel
